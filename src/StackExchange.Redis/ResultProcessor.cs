@@ -126,6 +126,9 @@ namespace StackExchange.Redis
         public static readonly ResultProcessor<EndPoint>
             SentinelMasterEndpoint = new SentinelGetMasterAddressByNameProcessor();
 
+        public static readonly ResultProcessor<EndPoint[]>
+            SentinelAddressesEndPoints = new SentinelGetSentinelAddresses();
+
         public static readonly ResultProcessor<KeyValuePair<string, string>[][]>
             SentinelArrayOfArrays = new SentinelArrayOfArraysProcessor();
 
@@ -186,7 +189,7 @@ namespace StackExchange.Redis
                 var server = bridge.ServerEndPoint;
                 bool log = !message.IsInternalCall;
                 bool isMoved = result.StartsWith(CommonReplies.MOVED);
-                bool wasNoRedirect = ( message.Flags & CommandFlags.NoRedirect ) != 0;
+                bool wasNoRedirect = (message.Flags & CommandFlags.NoRedirect) != 0;
                 string err = string.Empty;
                 bool unableToConnectError = false;
                 if (isMoved || result.StartsWith(CommonReplies.ASK))
@@ -617,7 +620,7 @@ namespace StackExchange.Redis
                 if (result.IsError && result.StartsWith(CommonReplies.READONLY))
                 {
                     var bridge = connection.BridgeCouldBeNull;
-                    if(bridge != null)
+                    if (bridge != null)
                     {
                         var server = bridge.ServerEndPoint;
                         server.Multiplexer.Trace("Auto-configured role: slave");
@@ -711,13 +714,18 @@ namespace StackExchange.Redis
                                 }
                             }
                         }
+                        else if (message?.Command == RedisCommand.SENTINEL)
+                        {
+                            server.ServerType = ServerType.Sentinel;
+                            server.Multiplexer.Trace("Auto-configured server-type: sentinel");
+                        }
                         SetResult(message, true);
                         return true;
                     case ResultType.MultiBulk:
                         if (message?.Command == RedisCommand.CONFIG)
                         {
                             var iter = result.GetItems().GetEnumerator();
-                            while(iter.MoveNext())
+                            while (iter.MoveNext())
                             {
                                 ref RawResult key = ref iter.Current;
                                 if (!iter.MoveNext()) break;
@@ -761,6 +769,11 @@ namespace StackExchange.Redis
                                     }
                                 }
                             }
+                        }
+                        else if (message?.Command == RedisCommand.SENTINEL)
+                        {
+                            server.ServerType = ServerType.Sentinel;
+                            server.Multiplexer.Trace("Auto-configured server-type: sentinel");
                         }
                         SetResult(message, true);
                         return true;
@@ -972,7 +985,7 @@ namespace StackExchange.Redis
                     SetResult(message, true);
                     return true;
                 }
-                if(message.Command == RedisCommand.AUTH) connection?.BridgeCouldBeNull?.Multiplexer?.SetAuthSuspect();
+                if (message.Command == RedisCommand.AUTH) connection?.BridgeCouldBeNull?.Multiplexer?.SetAuthSuspect();
                 return false;
             }
         }
@@ -1620,13 +1633,13 @@ The coordinates as a two items x,y array (longitude,latitude).
                 var lastGeneratedId = Redis.RedisValue.Null;
                 StreamEntry firstEntry = StreamEntry.Null, lastEntry = StreamEntry.Null;
                 var iter = arr.GetEnumerator();
-                for(int i = 0; i < max; i++)
+                for (int i = 0; i < max; i++)
                 {
                     ref RawResult key = ref iter.GetNext(), value = ref iter.GetNext();
                     if (key.Payload.Length > CommandBytes.MaxLength) continue;
 
                     var keyBytes = new CommandBytes(key.Payload);
-                    if(keyBytes.Equals(CommonReplies.length))
+                    if (keyBytes.Equals(CommonReplies.length))
                     {
                         if (!value.TryGetInt64(out length)) return false;
                     }
@@ -1716,8 +1729,8 @@ The coordinates as a two items x,y array (longitude,latitude).
                     lowestId: arr[1].AsRedisValue(),
                     highestId: arr[2].AsRedisValue(),
                     consumers: consumers ?? Array.Empty<StreamConsumer>());
-                    // ^^^^^
-                    // Should we bother allocating an empty array only to prevent the need for a null check?
+                // ^^^^^
+                // Should we bother allocating an empty array only to prevent the need for a null check?
 
                 SetResult(message, pendingInfo);
                 return true;
@@ -1967,12 +1980,70 @@ The coordinates as a two items x,y array (longitude,latitude).
                             return true;
                         }
                         break;
+                }
+                return false;
+            }
+        }
+
+        sealed class SentinelGetSentinelAddresses : ResultProcessor<EndPoint[]>
+        {
+            protected override bool SetResultCore(PhysicalConnection connection, Message message, in RawResult result)
+            {
+
+                List<EndPoint> endPoints = new List<EndPoint>();
+
+                switch (result.Type)
+                {
+                    case ResultType.MultiBulk:
+                        RawResult[] items = result.GetItems().ToArray();
+
+                        foreach (RawResult item in items)
+                        {
+                            var arr = item.GetItemsAsValues();
+                            String ip = null;
+                            String portStr = null;
+
+                            for (int i = 0; i < arr.Length && (ip == null || portStr == null); i += 2)
+                            {
+                                String name = arr[i];
+                                String value = arr[i + 1];
+
+                                switch (name)
+                                {
+                                    case "ip":
+                                        ip = value;
+                                        break;
+
+                                    case "port":
+                                        portStr = value;
+                                        break;
+
+                                    default:
+                                        break;
+                                }
+                            }
+
+                            int port;
+                            if (ip != null && portStr != null && int.TryParse(portStr, out port))
+                            {
+                                endPoints.Add(Format.ParseEndPoint(ip, port));
+                            }
+                        }
+                        break;
+
                     case ResultType.SimpleString:
                         //We don't want to blow up if the master is not found
                         if (result.IsNull)
                             return true;
                         break;
                 }
+
+                if (endPoints.Count > 0)
+                {
+                    SetResult(message, endPoints.ToArray());
+                    return true;
+                }
+
                 return false;
             }
         }
